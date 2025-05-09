@@ -141,7 +141,7 @@ class Surepy:
         """Fetch pet information."""
         return await self.sac.get_pets()
 
-    async def latest_actions(self, household_id: int) -> dict[int, dict[str, Any]] | None:
+    async def latest_actions(self, household_id: int, pet_id: int) -> dict[int, dict[str, Any]] | None:
         """
         Args:
             household_id (int): ID associated with household
@@ -151,61 +151,49 @@ class Surepy:
             Get the latest action using pet_id and household_id
             from raw data and output as a dictionary
         """
-        return await self.get_actions(household_id=household_id)
+        return await self.get_actions(household_id=household_id, pet_id=pet_id)
 
-    async def all_actions(self, household_id: int) -> dict[int, dict[str, Any]] | None:
+    async def all_actions(self, household_id: int, pet_id: int) -> dict[int, dict[str, Any]] | None:
         """Args:
         - household_id (int): id associated with household
         - pet_id (int): id associated with pet
         """
-        return await self.get_actions(household_id=household_id)
+        return await self.get_actions(household_id=household_id, pet_id=pet_id)
 
-    async def get_actions(self, household_id: int) -> dict[int, dict[str, Any]] | None:
-        resource = f"{BASE_RESOURCE}/report/household/{household_id}"
+    async def get_actions(self, household_id: int, pet_id: int) -> dict[int, dict[str, Any]] | None:
+        resource = f"{BASE_RESOURCE}/report/household/{household_id}/pet/{pet_id}/aggregate"
 
         latest_actions: dict[int, dict[str, Any]] = {}
 
-        pet_device_pairs: dict[str, Any] = (
+        aggregate_results: dict[str, Any] = (
             await self.sac.call(method="GET", resource=resource) or {}
         )
 
-        if "data" not in pet_device_pairs:
+        if "data" not in aggregate_results:
             return latest_actions
 
-        data: list[dict[str, Any]] = pet_device_pairs["data"]
+        data: list[dict[str, Any]] = aggregate_results["data"]
 
-        for pair in data:
+        if "movement" in data:
+            if "datapoints" in data["movement"]:
+                for datapoint in data["movement"]["datapoints"]:
+                    device: SurepyDevice = self.entities[datapoint["device_id"]]  # type: ignore
+                    if device.type in [EntityType.CAT_FLAP, EntityType.PET_FLAP]:
+                        latest_actions[pet_id] = device._data["move"] = datapoint
 
-            pet_id = int(pair["pet_id"])
-            device_id = int(pair["device_id"])
-            device: SurepyDevice = self.entities[device_id]  # type: ignore
+        if "feeding" in data:
+            if "datapoints" in data["feeding"]:
+                for datapoint in data["feeding"]["datapoints"]:
+                    device: SurepyDevice = self.entities[datapoint["device_id"]]  # type: ignore
+                    if device.type in [EntityType.FEEDER, EntityType.FEEDER_LITE]:
+                        latest_actions[pet_id] = device._data["lunch"] = datapoint  
 
-            latest_actions[pet_id] = {}
-            latest_actions[pet_id] = self.entities[device_id]._data
-
-            # movement
-            if (
-                device.type in [EntityType.CAT_FLAP, EntityType.PET_FLAP]
-                and pair["movement"]["datapoints"]
-            ):
-                latest_datapoint = pair["movement"]["datapoints"].pop()
-                # latest_actions[pet_id]["move"] = latest_datapoint
-                latest_actions[pet_id] = self.entities[device_id]._data["move"] = latest_datapoint
-
-            # feeding
-            elif (
-                device.type in [EntityType.FEEDER, EntityType.FEEDER_LITE]
-                and pair["feeding"]["datapoints"]
-            ):
-                latest_datapoint = pair["feeding"]["datapoints"].pop()
-                # latest_actions[pet_id]["lunch"] = latest_datapoint
-                latest_actions[pet_id] = self.entities[device_id]._data["lunch"] = latest_datapoint
-
-            # drinking
-            elif device.type == EntityType.FELAQUA and pair["drinking"]["datapoints"]:
-                latest_datapoint = pair["drinking"]["datapoints"].pop()
-                # latest_actions[pet_id]["drink"] = latest_datapoint
-                latest_actions[pet_id] = self.entities[device_id]._data["drink"] = latest_datapoint
+        if "drinking" in data:
+            if "datapoints" in data["drinking"]:
+                for datapoint in data["drinking"]["datapoints"]:
+                    device: SurepyDevice = self.entities[datapoint["device_id"]]  # type: ignore
+                    if device.type == EntityType.FELAQUA:
+                        latest_actions[pet_id] = device._data["drink"] = datapoint
 
         return latest_actions
 
@@ -383,6 +371,7 @@ class Surepy:
                 surepy_entities[entity_id] = Hub(data=entity)
             elif entity_type == EntityType.PET:
                 surepy_entities[entity_id] = Pet(data=entity)
+                await self.get_actions(household_id=surepy_entities[entity_id].household_id, pet_id=entity_id)
 
             else:
                 logger.warning(
@@ -393,9 +382,6 @@ class Surepy:
 
             self.entities[entity_id] = surepy_entities[entity_id]
 
-        # fetch additional data about movement, feeding & drinking
-        for household_id in household_ids:
-            await self.get_actions(household_id=household_id)
         for household_id in felaqua_household_ids:
             await self.get_latest_anonymous_drinks(household_id=household_id)
 
